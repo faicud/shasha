@@ -10,6 +10,14 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="شاشة" />
+    <!-- متصفح التلفزيون (LG/سامسونج): نحوّله لنسخة التلفزيون اللي تشتغل على المتصفحات القديمة -->
+    <script id="tv-redirect">
+      (function () {
+        var ua = navigator.userAgent;
+        var tv = /Web0S|webOS|NetCast/i.test(ua) || (/Tizen/i.test(ua) && /TV|SMART-TV/i.test(ua));
+        if (tv && /^https?:$/.test(location.protocol) && location.pathname.indexOf("/tv/") < 0) location.replace("tv/" + location.search + location.hash);
+      })();
+    </script>
     <link rel="manifest" href="/shasha/manifest.webmanifest" />
     <link rel="icon" type="image/png" href="/shasha/icon-192.png" />
     <link rel="apple-touch-icon" href="/shasha/apple-touch-icon.png" />
@@ -24,7 +32,7 @@
     <meta property="og:url" content="https://faicud.github.io/shasha/" />
     <meta property="og:image" content="https://faicud.github.io/shasha/icon-512.png" />
     <meta property="og:locale" content="ar_SA" />
-    <script type="module" crossorigin src="/shasha/assets/index-ru8dTbbI.js"></script>
+    <script type="module" crossorigin src="/shasha/assets/index-DiYjplwo.js"></script>
     <link rel="stylesheet" crossorigin href="/shasha/assets/index-DUyEd6ws.css">
   </head>
   <body>
