@@ -422,17 +422,41 @@ function run(f, x) {
 Speech.prototype.push = function (startSec, planes, count) {
   var L = planes[0];
   var R = planes.length > 1 ? planes[1] : planes[0];
+  // نمشي بعدّاد عيّنات متصل (أوقات الإطارات متذبذبة شوي)، ونرجع لوقت الإطار بس لو فيه فجوة حقيقية
   var startSample = Math.round(startSec * this.rate);
-  for (var i = 0; i < count; i++) {
-    var idx = Math.floor((startSample + i) / this.win);
+  if (this.next === undefined || this.next === null || Math.abs(startSample - this.next) > this.rate * 0.15) this.next = startSample;
+  var pos = this.next;
+  this.next += count;
+  var hp = this.hp, lp = this.lp;
+  var hb0 = hp.b0, hb1 = hp.b1, hb2 = hp.b2, ha1 = hp.a1, ha2 = hp.a2;
+  var lb0 = lp.b0, lb1 = lp.b1, lb2 = lp.b2, la1 = lp.a1, la2 = lp.a2;
+  var hx1 = hp.x1, hx2 = hp.x2, hy1 = hp.y1, hy2 = hp.y2;
+  var lx1 = lp.x1, lx2 = lp.x2, ly1 = lp.y1, ly2 = lp.y2;
+  var win = this.win;
+  var i = 0;
+  while (i < count) {
+    var idx = Math.floor((pos + i) / win);
     if (idx !== this.idx) {
       this.flush();
       this.idx = idx;
     }
-    var y = run(this.lp, run(this.hp, (L[i] + R[i]) * 0.5));
-    this.acc += y * y;
-    this.n++;
+    // كم عيّنة باقية في نفس الجزء الزمني
+    var stop = Math.min(count, (idx + 1) * win - pos);
+    var acc = 0;
+    var from = i;
+    for (; i < stop; i++) {
+      var x = (L[i] + R[i]) * 0.5;
+      var y = hb0 * x + hb1 * hx1 + hb2 * hx2 - ha1 * hy1 - ha2 * hy2;
+      hx2 = hx1; hx1 = x; hy2 = hy1; hy1 = y;
+      var z = lb0 * y + lb1 * lx1 + lb2 * lx2 - la1 * ly1 - la2 * ly2;
+      lx2 = lx1; lx1 = y; ly2 = ly1; ly1 = z;
+      acc += z * z;
+    }
+    this.acc += acc;
+    this.n += i - from;
   }
+  hp.x1 = hx1; hp.x2 = hx2; hp.y1 = hy1; hp.y2 = hy2;
+  lp.x1 = lx1; lp.x2 = lx2; lp.y1 = ly1; lp.y2 = ly2;
 };
 Speech.prototype.flush = function () {
   if (this.idx >= 0 && this.n > this.win * 0.5) {
@@ -575,6 +599,7 @@ function Session(msg) {
   this.speech = null;
   this.lastOut = 0; // آخر وقت (ثواني) طلع في الناتج
   this.lastVideoDts = null;
+  this.aNext = null; // وقت إطار الصوت الجاي (بوحدة الناتج)
 }
 
 function setDiscard(ss) {
@@ -638,6 +663,36 @@ function writePacket(ss, outIndex, data, pts, dts, dur, flags, tbNum, tbDen) {
   var r = lib.av_interleaved_write_frame_sync(ss.oc, inPkt);
   lib.av_packet_unref_sync(inPkt);
   if (r < 0) log("write error", outIndex, lib.ff_error_sync(r));
+}
+
+/**
+ * الصوت: أوقات MKV بالملي ثانية فتجي متذبذبة (1008/1056 بدل 1024 عيّنة)، و Safari يرمي الأجزاء
+ * اللي فيها تداخل. فنكتب أوقات متصلة بالضبط (كل إطار يبدأ لما يخلص اللي قبله)،
+ * ونرجع لوقت الملف بس لو فيه فجوة حقيقية (أكثر من 150ms).
+ */
+function writeAudio(ss, data, pts, dur, flags, tbNum, tbDen) {
+  var to = ss.tbOut[ss.aOut];
+  var k = (tbNum * to[1]) / (tbDen * to[0]);
+  var p = pts === null ? null : Math.round(pts * k);
+  var d = Math.round((dur || 0) * k);
+  var perSec = to[1] / to[0];
+  // وحدة الوقت = عيّنة: نقرّب المدة لأقرب 256 (AAC = 1024، AC3 = 1536)
+  if (to[0] === 1 && d > 0) d = Math.max(256, Math.round(d / 256) * 256);
+  var exp = ss.aNext;
+  if (p !== null && (exp === null || Math.abs(p - exp) > perSec * 0.15)) exp = p;
+  if (exp === null) return;
+  ss.aNext = exp + (d > 0 ? d : 0);
+  // إطار التهيئة في AAC يجي قبل الصفر: ما نحتاجه
+  if (exp < 0) return;
+  var pp = split64(exp);
+  var uu = split64(d);
+  lib.ff_copyin_packet_sync(inPkt, {
+    data: data, pts: pp[0], ptshi: pp[1], dts: pp[0], dtshi: pp[1],
+    duration: uu[0], durationhi: uu[1], stream_index: ss.aOut, flags: flags,
+  });
+  var r = lib.av_interleaved_write_frame_sync(ss.oc, inPkt);
+  lib.av_packet_unref_sync(inPkt);
+  if (r < 0) log("audio write error", lib.ff_error_sync(r));
 }
 
 /**
@@ -705,11 +760,15 @@ async function runSession(ss) {
   var audioQueue = [];
   var lastPost = Date.now();
   for (;;) {
+    // نفسح المجال للرسائل (تقديم/تأخير ومكان التشغيل): بدون هذا الحلقة ممكن تحجزها لين تخلص
+    await sleep(0);
     if (ss.cancel) break;
     // ما نسبق التشغيل بأكثر من AHEAD ثانية
     while (!ss.cancel && ss.lastOut - playhead > ss.ahead) await sleep(300);
     if (ss.cancel) break;
-    var res = await lib.ff_read_frame_multi(fmt, inPkt, { limit: 1024 * 1024, unify: true });
+    // أول القراءات صغيرة عشان الصورة تطلع بسرعة، بعدها دفعات أكبر
+    ss.reads = (ss.reads || 0) + 1;
+    var res = await lib.ff_read_frame_multi(fmt, inPkt, { limit: ss.reads < 4 ? 256 * 1024 : 768 * 1024, unify: true });
     if (ss.cancel) break;
     session.readAny = true;
     var code = res[0];
@@ -733,7 +792,7 @@ async function runSession(ss) {
         if (sec > ss.lastOut) ss.lastOut = sec;
       } else if (s === a) {
         if (ss.audioMode === "copy") {
-          writePacket(ss, ss.aOut, p.data, pts, dts === null ? pts : dts, dur, p.flags, s.tbNum, s.tbDen);
+          writeAudio(ss, p.data, pts === null ? dts : pts, dur, p.flags, s.tbNum, s.tbDen);
           if (!v) {
             var as = tsSec(pts, s) - media.startTime;
             if (as > ss.lastOut) ss.lastOut = as;
@@ -746,6 +805,7 @@ async function runSession(ss) {
         cues.push({ stream: s.index, start: start, end: start + (dur ? (dur * s.tbNum) / s.tbDen : 3), text: subText(s.codec, p.data) });
       }
     }
+    if (ss.cancel) break;
     if (ss.chain && (audioQueue.length || code === lib.AVERROR_EOF)) {
       var eof = code === lib.AVERROR_EOF;
       var frames = await audioFrames(ss, audioQueue, eof);
@@ -756,7 +816,7 @@ async function runSession(ss) {
           var ep = enc[e];
           var epts = i64(ep.pts, ep.ptshi);
           var edts = i64(ep.dts, ep.dtshi);
-          writePacket(ss, ss.aOut, ep.data, epts, edts === null ? epts : edts, i64(ep.duration, ep.durationhi), ep.flags, 1, 48000);
+          writeAudio(ss, ep.data, epts === null ? edts : epts, i64(ep.duration, ep.durationhi), ep.flags, 1, 48000);
         }
       }
     }
