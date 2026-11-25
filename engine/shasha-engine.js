@@ -299,6 +299,7 @@ async function openFile(msg) {
       language: lib.shasha_meta_sync(fmt, i, "language") || "",
       title: lib.shasha_meta_sync(fmt, i, "title") || "",
       isDefault: (lib.shasha_disposition_sync(fmt, i) & 1) === 1,
+      forced: (lib.shasha_disposition_sync(fmt, i) & 0x40) !== 0,
       attached: (lib.shasha_disposition_sync(fmt, i) & 0x400) !== 0, // صورة الغلاف
       delay: lib.shasha_video_delay_sync(par),
       fps: 0,
@@ -346,7 +347,7 @@ async function openFile(msg) {
     return {
       index: x.index, type: x.type, codec: x.codec, codecString: x.codecString, profile: x.profile, level: x.level,
       width: x.width, height: x.height, channels: x.channels, sampleRate: x.sampleRate, language: x.language,
-      title: x.title, isDefault: x.isDefault, tenBit: !!x.tenBit,
+      title: x.title, isDefault: x.isDefault, forced: x.forced, tenBit: !!x.tenBit,
     };
   };
   return {
