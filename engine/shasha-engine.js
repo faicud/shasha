@@ -53,6 +53,8 @@ function split64(v) {
 /* ───── قراءة الملف من السيرفر ─────
  * نخلي اتصال واحد مفتوح يقرأ للأمام (bytes=pos-)، ولو المكتبة طلبت مكان بعيد نفتح اتصال جديد.
  * ونحتفظ بآخر القطع اللي أرسلناها عشان لو رجعت المكتبة خطوة لورا ما نحتاج اتصال جديد. */
+var lowMemory = false; // الجوال: كاش ودفعات أصغر
+
 function Source(url, size) {
   this.url = url;
   this.size = size;
@@ -119,7 +121,7 @@ Source.prototype.remember = function (pos, data) {
   var total = 0;
   for (var i = this.cache.length - 1; i >= 0; i--) {
     total += this.cache[i].data.length;
-    if (total > 12 * 1024 * 1024) {
+    if (total > (lowMemory ? 4 : 12) * 1024 * 1024) {
       this.cache.splice(0, i);
       break;
     }
@@ -165,7 +167,7 @@ Source.prototype.readNet = async function (pos, want) {
     }
   }
   // أول قراءات (رأس الملف) صغيرة وسريعة، وبعدها نكبّر الدفعة
-  var target = Math.min(this.size - pos, Math.max(want, this.seq > 3 ? 2 * 1024 * 1024 : 256 * 1024));
+  var target = Math.min(this.size - pos, Math.max(want, this.seq > 3 ? (lowMemory ? 1024 * 1024 : 2 * 1024 * 1024) : 256 * 1024));
   var parts = [];
   var got = 0;
   while (got < target) {
@@ -891,6 +893,7 @@ self.onmessage = function (ev) {
     try {
       if (m.t === "open") {
         wantSpeech = !!m.speech;
+        lowMemory = !!m.lowMemory;
         var info = await openFile(m);
         post({ t: "info", info: info });
       } else if (m.t === "play") {
