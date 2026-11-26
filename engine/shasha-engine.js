@@ -740,7 +740,9 @@ async function runSession(ss) {
   // نقطة البداية: أقرب نقطة مفتاحية قبل المكان المطلوب
   var target = Math.max(0, ss.at + media.startTime);
   if (ss.at > 0.5 || session.readAny) {
-    var us = Math.floor(target * 1e6);
+    // قريب من البداية: نسمح لحد ثانية بعد المكان، لأن أول نقطة مفتاحية غالبًا بعد الصفر بأجزاء من الثانية،
+    // والبحث عن "قبل الصفر" كان يطيّحنا على النقطة الثانية (بعد ٤-١٠ ثواني) ويعلّق التشغيل على 0:00
+    var us = Math.floor((ss.at < 1 ? target + 1 : target) * 1e6);
     var t = split64(us);
     var r = await lib.avformat_seek_file_max(fmt, -1, t[0], t[1], 0);
     if (r < 0) {
@@ -918,3 +920,8 @@ self.onmessage = function (ev) {
     }
   });
 };
+
+// الجوال: نرسل حجم ذاكرة المحرك كل ٥ ثواني (يظهر في تقرير الانقطاع لو التطبيق انقفل)
+setInterval(function () {
+  try { if (lowMemory && lib && lib.HEAPU8) post({ t: "mem", heap: lib.HEAPU8.length >> 20 }); } catch (e) {}
+}, 5000);
