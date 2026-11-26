@@ -51,7 +51,9 @@ function split64(v) {
 }
 
 /* ───── قراءة الملف من السيرفر ─────
- * نخلي اتصال واحد مفتوح يقرأ للأمام (bytes=pos-)، ولو المكتبة طلبت مكان بعيد نفتح اتصال جديد.
+ * نقرأ للأمام بطلبات محدودة الحجم (bytes=pos-end، ١٢MB في الجوال)، ولو المكتبة طلبت مكان بعيد نفتح اتصال جديد.
+ * ليش محدودة: Safari ما يوقف التحميل لما ما نقرأ، فطلب "لين آخر الملف" كان ينزّل الملف كله في الذاكرة
+ * (ملف 1.4GB مع سرعة TorBox يعبّي ذاكرة الآيفون في دقيقة ويقفل الصفحة).
  * ونحتفظ بآخر القطع اللي أرسلناها عشان لو رجعت المكتبة خطوة لورا ما نحتاج اتصال جديد. */
 var lowMemory = false; // الجوال: كاش ودفعات أصغر
 
@@ -81,9 +83,14 @@ Source.prototype.open = function (pos) {
   this.drop();
   var ctrl = new AbortController();
   var self_ = this;
-  var conn = { pos: pos, reader: null, ctrl: ctrl, left: null, ready: null };
-  conn.ready = fetch(this.url, { headers: { Range: "bytes=" + pos + "-" }, signal: ctrl.signal, cache: "no-store" }).then(function (res) {
+  var span = (lowMemory ? 12 : 32) * 1024 * 1024;
+  var end = this.size > 0 ? Math.min(this.size - 1, pos + span - 1) : -1;
+  var conn = { pos: pos, end: end, reader: null, ctrl: ctrl, left: null, ready: null };
+  var range = "bytes=" + pos + "-" + (end >= 0 ? end : "");
+  conn.ready = fetch(this.url, { headers: { Range: range }, signal: ctrl.signal, cache: "no-store" }).then(function (res) {
     if (res.status !== 206 && !(res.status === 200 && pos === 0)) throw new Error("HTTP " + res.status);
+    // السيرفر تجاهل الحد وأرسل الملف كامل: نعتبر الاتصال مفتوح لآخر الملف
+    if (res.status === 200) conn.end = -1;
     if (!res.body) throw new Error("no body");
     conn.reader = res.body.getReader();
   });
@@ -158,7 +165,12 @@ Source.prototype.readNet = async function (pos, want) {
   }
   while (conn.pos < pos) {
     var skip = await this.chunk(conn);
-    if (!skip) throw new Error("eof while skipping");
+    if (!skip) {
+      // خلص الطلب قبل المكان المطلوب: نفتح طلب جديد من المكان نفسه
+      conn = this.open(pos);
+      this.seq = 0;
+      break;
+    }
     var need = pos - conn.pos;
     if (skip.length > need) {
       conn.left = skip.subarray(need);
@@ -173,7 +185,14 @@ Source.prototype.readNet = async function (pos, want) {
   var got = 0;
   while (got < target) {
     var c = await this.chunk(conn);
-    if (!c) break;
+    if (!c) {
+      // خلص الطلب المحدود: نكمل بطلب جديد من بعده (إلا لو وصلنا آخر الملف)
+      if (conn.end >= 0 && pos + got < this.size) {
+        conn = this.open(pos + got);
+        continue;
+      }
+      break;
+    }
     if (got + c.length > target && got >= want) {
       var take = target - got;
       parts.push(c.subarray(0, take));
@@ -193,7 +212,7 @@ Source.prototype.readNet = async function (pos, want) {
       o += parts[i].length;
     }
   }
-  conn.pos += got;
+  conn.pos = pos + got;
   this.remember(pos, out);
   return out;
 };
