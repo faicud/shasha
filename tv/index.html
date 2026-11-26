@@ -23,5 +23,100 @@
   <body>
     <div id="root"></div>
     <noscript>شاشة (Shasha): تطبيق مشاهدة بواجهة عربية يشتغل بإضافات Stremio. شغّل JavaScript عشان يفتح التطبيق.</noscript>
+    <!-- لو التطبيق ما فتح (متصفح قديم أو خطأ)، بدل الشاشة السوداء نطلع السبب وطرق ثانية. ES5 عشان يشتغل في أي متصفح -->
+    <script id="boot-check">
+      (function () {
+        var errs = [];
+        function add(m) {
+          if (errs.length < 4) errs.push(String(m).slice(0, 200));
+        }
+        window.addEventListener("error", function (e) {
+          add((e.message || "error") + (e.filename ? " (" + e.filename.split("/").pop() + ":" + e.lineno + ")" : ""));
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e.reason;
+          add("promise: " + ((r && r.message) || r));
+        });
+        // بعض متصفحات التلفزيون (WebView) تقفل التخزين، فنعطي التطبيق تخزين مؤقت بالذاكرة بدل ما يطيح
+        var ok = false;
+        try {
+          localStorage.setItem("shasha:probe", "1");
+          localStorage.removeItem("shasha:probe");
+          ok = true;
+        } catch (e) {}
+        if (!ok) {
+          try {
+            var mem = {};
+            var shim = {
+              getItem: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },
+              setItem: function (k, v) { mem[k] = String(v); },
+              removeItem: function (k) { delete mem[k]; },
+              clear: function () { mem = {}; },
+              key: function (i) { return Object.keys(mem)[i] || null; },
+            };
+            Object.defineProperty(shim, "length", { get: function () { return Object.keys(mem).length; } });
+            Object.defineProperty(window, "localStorage", { configurable: true, value: shim });
+            Object.defineProperty(window, "sessionStorage", { configurable: true, value: shim });
+          } catch (e) {}
+        }
+        var t0 = Date.now();
+        var box = null;
+        function mounted() {
+          var r = document.getElementById("root");
+          return !!(r && r.childElementCount > 0);
+        }
+        function link(href, text) {
+          var a = document.createElement("a");
+          a.href = href;
+          a.textContent = text;
+          a.style.cssText = "display:inline-block;margin:8px;padding:12px 22px;border-radius:10px;background:#fff;color:#000;text-decoration:none;font-weight:bold";
+          return a;
+        }
+        function show() {
+          box = document.createElement("div");
+          box.id = "boot-fail";
+          box.setAttribute("dir", "rtl");
+          box.style.cssText = "position:fixed;inset:0;top:0;left:0;right:0;bottom:0;z-index:99999;background:#000;color:#fff;font:20px/1.6 sans-serif;padding:40px;overflow:auto;text-align:center";
+          var h = document.createElement("div");
+          h.style.cssText = "font-size:28px;font-weight:bold;margin-bottom:12px";
+          h.textContent = "المتصفح هذا ما قدر يفتح شاشة";
+          box.appendChild(h);
+          var p = document.createElement("div");
+          var inTv = location.pathname.indexOf("/tv/") >= 0 || location.protocol === "file:";
+          p.textContent = /Android/i.test(navigator.userAgent)
+            ? "لو تلفزيونك Android TV (مثل سوني): نزّل التطبيق من Downloader بالرابط faicud.github.io/shasha/tv.apk"
+            : "جرّب تحدّث المتصفح، أو افتح نسخة التلفزيون.";
+          box.appendChild(p);
+          var links = document.createElement("div");
+          links.style.margin = "16px 0";
+          var reload = link("#", "حاول مرة ثانية");
+          reload.onclick = function (e) {
+            e.preventDefault();
+            location.reload();
+          };
+          links.appendChild(reload);
+          if (/^https?:$/.test(location.protocol)) {
+            if (/Android/i.test(navigator.userAgent)) links.appendChild(link("https://faicud.github.io/shasha/tv.apk", "تطبيق Android TV"));
+            if (!inTv) links.appendChild(link("tv/", "نسخة التلفزيون"));
+          }
+          box.appendChild(links);
+          var d = document.createElement("div");
+          d.style.cssText = "font-size:14px;opacity:.6;direction:ltr;word-break:break-all";
+          d.textContent = (errs.length ? errs.join(" | ") + " — " : "") + navigator.userAgent;
+          box.appendChild(d);
+          document.body.appendChild(box);
+        }
+        var iv = setInterval(function () {
+          if (mounted()) {
+            clearInterval(iv);
+            if (box && box.parentNode) box.parentNode.removeChild(box);
+            return;
+          }
+          var wait = Date.now() - t0;
+          if (!box && (wait > 15000 || (errs.length && wait > 4000))) show();
+          if (wait > 180000) clearInterval(iv);
+        }, 1000);
+      })();
+    </script>
   </body>
 </html>
