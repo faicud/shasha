@@ -131,7 +131,8 @@ Source.prototype.remember = function (pos, data) {
 /** يرجّع بيانات تبدأ من pos (طولها على الأقل want لو الملف ما خلص) */
 Source.prototype.read = async function (pos, want) {
   var cached = this.fromCache(pos);
-  if (cached && cached.length >= Math.min(want, 65536)) return cached.slice();
+  // بدون نسخ: libav ينسخ البيانات لذاكرته بنفسه، والنسخ الزايدة كانت تعبّي ذاكرة الجوال
+  if (cached && cached.length >= Math.min(want, 65536)) return cached;
   var attempt = 0;
   for (;;) {
     if (this.closed) throw new Error("closed");
@@ -184,7 +185,7 @@ Source.prototype.readNet = async function (pos, want) {
     got += c.length;
   }
   if (!got) throw new Error("eof");
-  var out = parts.length === 1 ? parts[0].slice() : new Uint8Array(got);
+  var out = parts.length === 1 ? parts[0] : new Uint8Array(got);
   if (parts.length > 1) {
     var o = 0;
     for (var i = 0; i < parts.length; i++) {
@@ -194,7 +195,7 @@ Source.prototype.readNet = async function (pos, want) {
   }
   conn.pos += got;
   this.remember(pos, out);
-  return out.slice();
+  return out;
 };
 
 /* ───── تحميل المكتبة وفتح الملف ───── */
