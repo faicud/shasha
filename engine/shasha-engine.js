@@ -769,6 +769,15 @@ async function runSession(ss) {
     // ما نسبق التشغيل بأكثر من AHEAD ثانية
     while (!ss.cancel && ss.lastOut - playhead > ss.ahead) await sleep(300);
     if (ss.cancel) break;
+    // الجوال: لو جاهز قدّام ١٢ ثانية، نجهّز الباقي بهدوء (٦ أضعاف سرعة التشغيل بالكثير) بدل دفعة وحدة،
+    // عشان الذاكرة المؤقتة ما تتكدّس مرة وحدة (Safari يقفل الصفحة لو كبرت فجأة)
+    if (lowMemory && ss.lastOut - playhead > 12) {
+      if (ss.paceT == null) { ss.paceT = Date.now(); ss.paceM = ss.lastOut; }
+      while (!ss.cancel && ss.lastOut - ss.paceM > ((Date.now() - ss.paceT) / 1000) * 6 + 2) await sleep(100);
+      if (ss.cancel) break;
+    } else {
+      ss.paceT = null;
+    }
     // أول القراءات صغيرة عشان الصورة تطلع بسرعة، بعدها دفعات أكبر
     ss.reads = (ss.reads || 0) + 1;
     var res = await lib.ff_read_frame_multi(fmt, inPkt, { limit: ss.reads < 4 ? 256 * 1024 : 768 * 1024, unify: true });
