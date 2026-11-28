@@ -144,11 +144,16 @@ Source.prototype.read = async function (pos, want) {
   var cached = this.fromCache(pos);
   // بدون نسخ: libav ينسخ البيانات لذاكرته بنفسه، والنسخ الزايدة كانت تعبّي ذاكرة الجوال
   if (cached && cached.length >= Math.min(want, 65536)) return cached;
+  // أول الملف وآخره محفوظين في الجهاز من مرة سابقة؟
+  var kept = pcGet(pos);
+  if (kept && (kept.length >= Math.min(want, 65536) || (this.size > 0 && pos + kept.length >= this.size))) return kept;
   var attempt = 0;
   for (;;) {
     if (this.closed) throw new Error("closed");
     try {
-      return await this.readNet(pos, want);
+      var got = await this.readNet(pos, want);
+      pcPut(pos, got);
+      return got;
     } catch (e) {
       this.drop();
       if (this.closed || ++attempt > 4) throw e;
@@ -221,6 +226,100 @@ Source.prototype.readNet = async function (pos, want) {
   return out;
 };
 
+/* ───── أول الملف وآخره في الجهاز (IndexedDB) ─────
+ * فتح الملف يقرا أوله (المعلومات وأول المقاطع، لين ٢.٥MB) وآخره (فهرس الأماكن في MKV) قبل ما يوصل للمكان،
+ * يعني ٣ طلبات ورا بعض للسيرفر. نحفظ هذي الأجزاء، فلما تكمّل الحلقة بعدين نحتاج طلب واحد بس. */
+var PC_HEAD = 4 * 1024 * 1024;
+var PC_TAIL = 3 * 1024 * 1024;
+var PC_MAX = 25; // كم ملف نتذكر
+var pc = null; // {key, size, spans: [{pos, data}], dirty}
+
+function pcDb() {
+  return new Promise(function (res, rej) {
+    var r = indexedDB.open("shasha-engine", 1);
+    r.onupgradeneeded = function () { r.result.createObjectStore("heads"); };
+    r.onsuccess = function () { res(r.result); };
+    r.onerror = function () { rej(r.error); };
+  });
+}
+
+async function pcLoad(key, size) {
+  pc = key ? { key: key, size: size, spans: [], dirty: false } : null;
+  if (!pc || typeof indexedDB === "undefined") return;
+  try {
+    var db = await pcDb();
+    var rec = await new Promise(function (res) {
+      var g = db.transaction("heads", "readonly").objectStore("heads").get(key);
+      g.onsuccess = function () { res(g.result || null); };
+      g.onerror = function () { res(null); };
+    });
+    db.close();
+    if (rec && rec.spans && pc && pc.key === key) {
+      pc.spans = rec.spans.map(function (x) { return { pos: x.pos, data: new Uint8Array(x.data) }; });
+      log("kept", pc.spans.length);
+    }
+  } catch (e) { /* بدون ذاكرة */ }
+}
+
+function pcGet(pos) {
+  if (!pc) return null;
+  for (var i = 0; i < pc.spans.length; i++) {
+    var x = pc.spans[i];
+    if (pos >= x.pos && pos < x.pos + x.data.length) return x.data.subarray(pos - x.pos);
+  }
+  return null;
+}
+
+function pcCovered(a, b) {
+  for (var i = 0; i < pc.spans.length; i++) {
+    var x = pc.spans[i];
+    if (a >= x.pos && b <= x.pos + x.data.length) return true;
+  }
+  return false;
+}
+
+function pcPut(pos, data) {
+  if (!pc || !data || !data.length) return;
+  var end = pos + data.length;
+  var parts = [];
+  if (pos < PC_HEAD) parts.push([pos, Math.min(end, PC_HEAD)]);
+  if (pc.size > 0 && end > pc.size - PC_TAIL) parts.push([Math.max(pos, pc.size - PC_TAIL), end]);
+  for (var i = 0; i < parts.length; i++) {
+    var a = parts[i][0], b = parts[i][1];
+    if (b <= a || pcCovered(a, b)) continue;
+    pc.spans.push({ pos: a, data: data.slice(a - pos, b - pos) });
+    pc.dirty = true;
+  }
+}
+
+async function pcSave() {
+  if (!pc || !pc.dirty || typeof indexedDB === "undefined") return;
+  pc.dirty = false;
+  var key = pc.key;
+  var rec = { at: Date.now(), spans: pc.spans.map(function (x) { return { pos: x.pos, data: x.data.slice().buffer }; }) };
+  try {
+    var db = await pcDb();
+    await new Promise(function (res) {
+      var tx = db.transaction("heads", "readwrite");
+      var store = tx.objectStore("heads");
+      store.put(rec, key);
+      // نخلي آخر PC_MAX ملفات بس
+      var all = store.openCursor();
+      var list = [];
+      all.onsuccess = function () {
+        var c = all.result;
+        if (c) { list.push({ k: c.key, at: (c.value && c.value.at) || 0 }); c.continue(); return; }
+        list.sort(function (x, y) { return y.at - x.at; });
+        for (var i = PC_MAX; i < list.length; i++) store.delete(list[i].k);
+      };
+      tx.oncomplete = res;
+      tx.onerror = res;
+      tx.onabort = res;
+    });
+    db.close();
+  } catch (e) { /* ignore */ }
+}
+
 /* ───── تحميل المكتبة وفتح الملف ───── */
 
 async function loadLib(base) {
@@ -283,6 +382,7 @@ function videoCodecString(name, extradata, profile, level) {
 async function openFile(msg) {
   await loadLib(msg.base);
   if (src) src.close();
+  await pcLoad(msg.cacheKey, msg.size);
   src = new Source(msg.url, msg.size, msg.headers);
   try { lib.unlink_sync("in"); } catch (e) { /* ignore */ }
   await lib.mkblockreaderdev("in", msg.size);
@@ -808,6 +908,11 @@ async function runSession(ss) {
     var res = await lib.ff_read_frame_multi(fmt, inPkt, { limit: ss.reads < 4 ? 256 * 1024 : 768 * 1024, unify: true });
     if (ss.cancel) break;
     session.readAny = true;
+    // بعد ما طلع أول جزء: نحفظ أول الملف وآخره (اللي قريناهم وقت الفتح والبحث) للمرة الجاية
+    if (!ss.pcSaved && ss.lastOut > 0) {
+      ss.pcSaved = true;
+      pcSave();
+    }
     var code = res[0];
     var pkts = res[1][0] || [];
     var cues = [];
@@ -926,7 +1031,10 @@ self.onmessage = function (ev) {
   }
   queue = queue.then(async function () {
     try {
-      if (m.t === "open") {
+      if (m.t === "init") {
+        // تجهيز مسبق: نحمّل FFmpeg وإحنا ننتظر رابط الملف
+        await loadLib(m.base);
+      } else if (m.t === "open") {
         wantSpeech = !!m.speech;
         lowMemory = !!m.lowMemory;
         var info = await openFile(m);
