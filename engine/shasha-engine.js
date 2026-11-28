@@ -57,9 +57,11 @@ function split64(v) {
  * ونحتفظ بآخر القطع اللي أرسلناها عشان لو رجعت المكتبة خطوة لورا ما نحتاج اتصال جديد. */
 var lowMemory = false; // الجوال: كاش ودفعات أصغر
 
-function Source(url, size) {
+function Source(url, size, headers) {
   this.url = url;
   this.size = size;
+  // خانات لازم تنرسل مع كل طلب (بعض الإضافات تطلب مفتاح، مثل X-ArabMedia-Key)
+  this.headers = headers || null;
   this.conn = null; // {pos, reader, ctrl, left: Uint8Array|null}
   this.cache = []; // [{pos, data}]
   this.seq = 0; // كم قراءة متتالية (عشان نكبّر الدفعات)
@@ -87,7 +89,9 @@ Source.prototype.open = function (pos) {
   var end = this.size > 0 ? Math.min(this.size - 1, pos + span - 1) : -1;
   var conn = { pos: pos, end: end, reader: null, ctrl: ctrl, left: null, ready: null };
   var range = "bytes=" + pos + "-" + (end >= 0 ? end : "");
-  conn.ready = fetch(this.url, { headers: { Range: range }, signal: ctrl.signal, cache: "no-store" }).then(function (res) {
+  var headers = { Range: range };
+  if (this.headers) for (var k in this.headers) if (Object.prototype.hasOwnProperty.call(this.headers, k)) headers[k] = this.headers[k];
+  conn.ready = fetch(this.url, { headers: headers, signal: ctrl.signal, cache: "no-store" }).then(function (res) {
     if (res.status !== 206 && !(res.status === 200 && pos === 0)) throw new Error("HTTP " + res.status);
     // السيرفر تجاهل الحد وأرسل الملف كامل: نعتبر الاتصال مفتوح لآخر الملف
     if (res.status === 200) conn.end = -1;
@@ -279,7 +283,7 @@ function videoCodecString(name, extradata, profile, level) {
 async function openFile(msg) {
   await loadLib(msg.base);
   if (src) src.close();
-  src = new Source(msg.url, msg.size);
+  src = new Source(msg.url, msg.size, msg.headers);
   try { lib.unlink_sync("in"); } catch (e) { /* ignore */ }
   await lib.mkblockreaderdev("in", msg.size);
   var opts = lib.av_dict_set_js_sync(0, "probesize", "2500000", 0);
